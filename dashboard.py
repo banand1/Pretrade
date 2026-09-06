@@ -26,6 +26,7 @@ def latest_snapshot_date(con):
     return None if df.empty or pd.isna(df.iloc[0, 0]) else pd.to_datetime(df.iloc[0, 0]).date()
 
 def run_ingest_button(label="Run ingest now", con=None):
+    """Returns True if it closed `con` to free the write lock for ingest.py."""
     if st.button(label, type="primary"):
         if con is not None: con.close()
         with st.spinner("Pulling market data…"):
@@ -34,6 +35,8 @@ def run_ingest_button(label="Run ingest now", con=None):
         st.code((r.stdout or "") + (r.stderr or ""), language="text")
         st.success("Ingest complete.") if r.returncode == 0 else st.error("Ingest failed.")
         if r.returncode == 0: st.rerun()
+        return con is not None
+    return False
 
 # --- banner logic ---
 def gather_events(today):
@@ -522,35 +525,39 @@ def main():
     con = get_con()
     if con is None:
         st.warning("No database yet."); run_ingest_button("Run first ingest"); return
-    li, snap_date = last_ingest(con), latest_snapshot_date(con)
-    top = st.columns([3, 1])
-    with top[0]:
-        if li: st.caption(f"Last ingest: **{li}**" + (f" · data **{snap_date}**" if snap_date else ""))
-        if snap_date and snap_date != today:
-            st.info(f"Showing {snap_date}; today's ingest hasn't run.")
-    with top[1]: run_ingest_button(con=con)
-    use_date = snap_date or today
-    ev = gather_events(today)
-    regime = _regime_vals(con, use_date)
-    render_banner(*compute_banner(today, ev, regime))
-    panel_overview(con, use_date, ev, regime)
-    panel_sectors(con, use_date)
-    leg_down_df, tight_df, doji_df, spy_dd, qqq_dd, leader_regime = \
-        _screen_all(C.DB_PATH, use_date, li)
-    panel_leader_macro_header(spy_dd, qqq_dd, leader_regime)
-    st.divider()
-    tabs = st.tabs(["Leg Down", "Tightness", "Doji Snapback",
-                    "Scanner", "ETFs", "Watchlist", "Flow", "News", "Seasonality"])
-    with tabs[0]: panel_leg_down(leg_down_df)
-    with tabs[1]: panel_tightness(tight_df)
-    with tabs[2]: panel_doji(doji_df, spy_dd)
-    with tabs[3]: panel_scanner(con, use_date)
-    with tabs[4]: panel_etfs(con, use_date)
-    with tabs[5]: panel_watchlist(con, use_date, ev)
-    with tabs[6]: panel_flow(con, use_date)
-    with tabs[7]: panel_news(con, use_date)
-    with tabs[8]: panel_seasonality(con, use_date)
-    con.close()
+    con_closed = False
+    try:
+        li, snap_date = last_ingest(con), latest_snapshot_date(con)
+        top = st.columns([3, 1])
+        with top[0]:
+            if li: st.caption(f"Last ingest: **{li}**" + (f" · data **{snap_date}**" if snap_date else ""))
+            if snap_date and snap_date != today:
+                st.info(f"Showing {snap_date}; today's ingest hasn't run.")
+        with top[1]: con_closed = run_ingest_button(con=con)
+        if con_closed: return  # ingest failed without rerunning; con is already closed
+        use_date = snap_date or today
+        ev = gather_events(today)
+        regime = _regime_vals(con, use_date)
+        render_banner(*compute_banner(today, ev, regime))
+        panel_overview(con, use_date, ev, regime)
+        panel_sectors(con, use_date)
+        leg_down_df, tight_df, doji_df, spy_dd, qqq_dd, leader_regime = \
+            _screen_all(C.DB_PATH, use_date, li)
+        panel_leader_macro_header(spy_dd, qqq_dd, leader_regime)
+        st.divider()
+        tabs = st.tabs(["Leg Down", "Tightness", "Doji Snapback",
+                        "Scanner", "ETFs", "Watchlist", "Flow", "News", "Seasonality"])
+        with tabs[0]: panel_leg_down(leg_down_df)
+        with tabs[1]: panel_tightness(tight_df)
+        with tabs[2]: panel_doji(doji_df, spy_dd)
+        with tabs[3]: panel_scanner(con, use_date)
+        with tabs[4]: panel_etfs(con, use_date)
+        with tabs[5]: panel_watchlist(con, use_date, ev)
+        with tabs[6]: panel_flow(con, use_date)
+        with tabs[7]: panel_news(con, use_date)
+        with tabs[8]: panel_seasonality(con, use_date)
+    finally:
+        if not con_closed: con.close()
 
 if __name__ == "__main__":
     main()

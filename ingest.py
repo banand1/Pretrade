@@ -1,6 +1,6 @@
 """Pre-market ingest — pulls free data (yfinance, RSS, CNN F&G) into DuckDB."""
 from __future__ import annotations
-import argparse, datetime as dt, sys, warnings
+import argparse, datetime as dt, sys, time, warnings
 import duckdb, numpy as np, pandas as pd
 import config as C
 
@@ -96,7 +96,16 @@ def atm_iv_from_chain(calls, puts, spot):
     return round(float(np.mean(ivs)) * 100, 1) if ivs else None
 
 # --- DuckDB ---
-def connect(path=C.DB_PATH): return duckdb.connect(path)
+def connect(path=C.DB_PATH, retries=5, retry_delay=2.0):
+    """A concurrent dashboard viewer session can briefly hold a read-only
+    lock on the same file; retry the write connection instead of failing
+    the whole ingest run over a transient overlap."""
+    for attempt in range(retries):
+        try:
+            return duckdb.connect(path)
+        except duckdb.IOException:
+            if attempt == retries - 1: raise
+            time.sleep(retry_delay)
 
 def create_tables(con):
     con.execute("""
