@@ -73,6 +73,63 @@ SCANNER_TICKERS = [
     "COST", "WMT", "HD",
 ]
 
+# --- Screener universe / per-stock sector map ------------------------------ #
+# Sector ETF each ticker is scored against for "RS vs sector" in the leader gate.
+# Best-effort GICS-ish mapping; anything not listed here falls back to XLK.
+STOCK_SECTOR = {
+    "AAPL": "XLK", "MSFT": "XLK", "GOOG": "XLC", "AMZN": "XLY", "META": "XLC",
+    "NVDA": "XLK", "TSLA": "XLY", "NFLX": "XLC",
+    "AVGO": "XLK", "AMD": "XLK", "MU": "XLK", "QCOM": "XLK", "ARM": "XLK",
+    "MRVL": "XLK", "INTC": "XLK", "LRCX": "XLK", "AMAT": "XLK",
+    "PLTR": "XLK", "CRWD": "XLK", "NET": "XLK", "SNOW": "XLK", "DDOG": "XLK",
+    "ZS": "XLK", "PANW": "XLK", "NOW": "XLK",
+    "SMCI": "XLK", "IONQ": "XLK", "RKLB": "XLI", "ANET": "XLK", "DELL": "XLK", "MSTR": "XLK",
+    "COIN": "XLF", "MARA": "XLK", "CLSK": "XLK", "RIOT": "XLK",
+    "XOM": "XLE", "CVX": "XLE", "OXY": "XLE", "SLB": "XLE",
+    "JPM": "XLF", "GS": "XLF", "BAC": "XLF", "MS": "XLF",
+    "CAT": "XLI", "DE": "XLI", "BA": "XLI", "LMT": "XLI", "RTX": "XLI",
+    "LLY": "XLV", "UNH": "XLV", "ABBV": "XLV", "JNJ": "XLV",
+    "COST": "XLP", "WMT": "XLP", "HD": "XLY",
+    # WATCHLIST (AI-infra names)
+    "AXTI": "XLK", "AAOI": "XLK", "NBIS": "XLK", "IREN": "XLK", "APLD": "XLK",
+    "CRWV": "XLK", "OKLO": "XLU", "MP": "XLB", "USAR": "XLB", "CRML": "XLB",
+    "WULF": "XLK", "GEV": "XLI", "VST": "XLU", "RGTI": "XLK",
+}
+
+# Combined universe the three leader screeners run over.
+SCREENER_UNIVERSE = sorted(set(SCANNER_TICKERS) | set(WATCHLIST))
+
+def sector_of(symbol: str) -> str:
+    return STOCK_SECTOR.get(symbol, "XLK")
+
+# --- Leader gate (shared pre-filter for all three screener panels) --------- #
+LEADER_RET_63D = 25.0     # 63-session return %% threshold ...
+LEADER_RET_126D = 50.0    # ... OR 126-session return %% threshold (either qualifies)
+
+# --- Panel 1: Leg Down ------------------------------------------------------ #
+LEGDOWN_DD_MIN = 2
+LEGDOWN_DD_MAX = 5
+LEGDOWN_OFF_HIGH_ATR = (1.0, 4.0)
+LEGDOWN_DIST_20EMA_ATR = (-1.0, 1.0)
+LEGDOWN_RVOL = 1.20
+
+# --- Panel 2: Tightness ------------------------------------------------------ #
+TIGHT_SPAN_ATR = 1.25
+TIGHT_CLOSE_SPREAD_ATR = 0.60
+TIGHT_LOW_CLUSTER_ATR = 0.25
+TIGHT_TWO_DAY_NET_ATR = 0.50
+TIGHT_VOL_DRY = 0.80
+TIGHT_RVOL = 1.50
+
+# --- Panel 3: Doji Snapback -------------------------------------------------- #
+SPY_FLUSH_DAYS = 4
+DOJI_BODY_MAX = 0.30
+DOJI_RANGE_ATR = 0.60
+DOJI_VOL = 0.80
+
+# --- Shared screener guardrails ---------------------------------------------- #
+EARNINGS_BLACKOUT_DAYS = 2   # earnings within N trading sessions greys the row
+
 # --- Parameters ------------------------------------------------------------ #
 MA_PERIODS = [10, 20, 50, 200]
 HIST_DAYS = 420                  # yfinance lookback (covers 200dma + IV-rank window)

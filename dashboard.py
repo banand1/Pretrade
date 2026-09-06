@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt, os, subprocess, sys
 import altair as alt, duckdb, pandas as pd, streamlit as st
 import config as C, market_calendar as mc
+import screeners as scr
 
 st.set_page_config(page_title="Pre-Trade Dashboard", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -395,6 +396,124 @@ def panel_scanner(con, today):
                 "range","%chg","vol_r","rng_r","vs20","vs50"]
         show_table(hist[cols], signed_cols=["%chg","vs20","vs50"], height=500)
 
+# --- leader screeners (Leg Down / Tightness / Doji Snapback) ---
+def _to_date(x):
+    return x.date() if isinstance(x, dt.datetime) else x
+
+@st.cache_data(show_spinner="Screening leaders…")
+def _screen_all(db_path, use_date, last_ingest_ts):
+    """Cached: recomputes only when the DB path, snapshot date, or last-ingest
+    timestamp changes (i.e. after a fresh ingest), not on every Streamlit rerun."""
+    con2 = duckdb.connect(db_path, read_only=True)
+    all_syms = sorted(set(C.SCREENER_UNIVERSE) | {"SPY", "QQQ"} | set(C.SECTORS))
+    ph = ",".join(["?"] * len(all_syms))
+    prices_df = con2.execute(f"SELECT symbol,date,open,high,low,close,volume FROM prices "
+                              f"WHERE symbol IN ({ph}) ORDER BY symbol,date", all_syms).fetchdf()
+    earn_df = con2.execute("SELECT symbol, next_earnings FROM earnings").fetchdf()
+    con2.close()
+    empty = pd.DataFrame()
+    if prices_df.empty:
+        return empty, empty, empty, None, None, "RED"
+
+    prices_map = {s: g.drop(columns="symbol").reset_index(drop=True) for s, g in prices_df.groupby("symbol")}
+    sector_prices_map = {s: prices_map[s] for s in C.SECTORS if s in prices_map}
+    spy_df, qqq_df = prices_map.get("SPY"), prices_map.get("QQQ")
+    universe_prices = {s: prices_map[s] for s in C.SCREENER_UNIVERSE if s in prices_map}
+    earnings = {r.symbol: _to_date(r.next_earnings) for r in earn_df.itertuples() if pd.notna(r.next_earnings)}
+
+    universe = scr.build_universe(universe_prices, sector_prices_map, spy_df=spy_df)
+    spy_dd = scr.dd_days(spy_df["close"]) if spy_df is not None else None
+    qqq_dd = scr.dd_days(qqq_df["close"]) if qqq_df is not None else None
+
+    leg_down = scr.screen_leg_down(universe, earnings, use_date)
+    tightness = scr.screen_tightness(universe, earnings, use_date)
+    doji = scr.screen_doji(universe, earnings, use_date, spy_dd)
+
+    spy_ema50_rising = None
+    if spy_df is not None:
+        e50 = scr.ema(spy_df["close"].dropna(), 50)
+        if len(e50) >= 6:
+            spy_ema50_rising = bool(e50.iloc[-1] > e50.iloc[-6])
+    spy_pct1d = None
+    if spy_df is not None and len(spy_df) >= 2:
+        p0, p1 = spy_df["close"].iloc[-1], spy_df["close"].iloc[-2]
+        spy_pct1d = (p0 - p1) / p1 * 100 if p1 else None
+    pct1d = pd.Series([(d["close"].iloc[-1] - d["close"].iloc[-2]) / d["close"].iloc[-2] * 100
+                       for d in universe_prices.values() if len(d) >= 2 and d["close"].iloc[-2]])
+    regime = scr.regime_tag(spy_ema50_rising, scr.market_ad_diverging(pct1d, spy_pct1d))
+
+    return leg_down, tightness, doji, spy_dd, qqq_dd, regime
+
+def panel_leader_macro_header(spy_dd, qqq_dd, regime):
+    st.caption("**Leader screeners — macro header**")
+    color = GREEN if regime == "GREEN" else RED
+    parts = [f"SPY dd_days: **{spy_dd if spy_dd is not None else 'N/A'}**",
+             f"QQQ dd_days: **{qqq_dd if qqq_dd is not None else 'N/A'}**"]
+    st.markdown(" · ".join(parts) +
+                f'&nbsp;&nbsp;<span style="background:{color};color:white;padding:2px 10px;'
+                f'border-radius:6px;font-weight:700;">{regime}</span>', unsafe_allow_html=True)
+    st.caption(f"dd_days = sessions since the last 5-session closing high (tolerating one up-close). "
+               f"Regime GREEN = SPY 50-EMA rising & breadth not diverging — context only, never an auto-buy. "
+               f"Doji Snapback arms at SPY dd_days ≥ {C.SPY_FLUSH_DAYS}.")
+
+def _screener_table(df, rename, signed_cols=(), height=None):
+    if df.empty:
+        st.caption("— no signals —"); return
+    view = df.copy()
+    view["next_earnings"] = view["next_earnings"].apply(
+        lambda d: "N/A" if d is None or pd.isna(d) else str(d))
+    blackout = view["earnings_blackout"].fillna(False) if "earnings_blackout" in view else pd.Series(False, index=view.index)
+    view = view.drop(columns=["earnings_blackout"], errors="ignore").rename(columns=rename)
+    sty = view.style.format(precision=2, na_rep="N/A")
+    for c in signed_cols:
+        if c in view.columns: sty = sty.map(_csign, subset=[c])
+    def _grey(row):
+        on = bool(blackout.loc[row.name])
+        return ["background-color: rgba(120,120,120,.35); color: #999" if on else ""] * len(row)
+    sty = sty.apply(_grey, axis=1)
+    kw = {"width": "stretch", "hide_index": True}
+    if height: kw["height"] = height
+    st.dataframe(sty, **kw)
+
+def panel_leg_down(leg_down_df):
+    st.caption("**Leg Down** — leader pulling back inside an uptrend. Pure stock screen: "
+               "no options/Greeks, no position sizing. Rows are entry/stop *levels*, not trade management.")
+    cols = ["symbol","status","close","dd_days","off_high_ATR","dist_20ema_ATR","RVOL","rs_63d",
+            "sector","sector_RS","pullback_low","reclaim_level","next_earnings","earnings_blackout"]
+    df = leg_down_df[[c for c in cols if c in leg_down_df.columns]] if not leg_down_df.empty else leg_down_df
+    _screener_table(df, {"pullback_low": "pullback_low (stop)"},
+                     signed_cols=["dist_20ema_ATR","rs_63d","sector_RS"])
+    st.caption(f"Eligible: leader · dd_days {C.LEGDOWN_DD_MIN}-{C.LEGDOWN_DD_MAX} · off_high_ATR "
+               f"{C.LEGDOWN_OFF_HIGH_ATR} · dist_20ema_ATR {C.LEGDOWN_DIST_20EMA_ATR} · no A/D divergence. "
+               "RESUMING needs RVOL ≥ %.2f. Greyed rows = earnings within 2 sessions (trigger suppressed)."
+               % C.LEGDOWN_RVOL)
+
+def panel_tightness(tight_df):
+    st.caption("**Tightness** — leader coiling in an uptrend (3-tight compression test).")
+    cols = ["symbol","status","close","tight_days","coil_age","ATR_dollar","ATR_pct","span_ATR",
+            "low_cluster_ATR","vol_dry_ratio","shrinking_TR","return_63d","off_63d_high_pct",
+            "breakout","stock_stop","sector","sector_RS","next_earnings","earnings_blackout"]
+    df = tight_df[[c for c in cols if c in tight_df.columns]] if not tight_df.empty else tight_df
+    _screener_table(df, {"ATR_dollar": "ATR$", "ATR_pct": "ATR%", "off_63d_high_pct": "off_63d_high%"},
+                     signed_cols=["return_63d","off_63d_high_pct","sector_RS"])
+    st.caption(f"BUILDING needs tight_days ≥ 3. TRIGGERED needs a close above breakout with RVOL ≥ "
+               f"{C.TIGHT_RVOL}. Signals are EOD (daily bars only — no intraday feed on free data). "
+               "Greyed rows = earnings within 2 sessions (trigger suppressed).")
+
+def panel_doji(doji_df, spy_dd):
+    if spy_dd is None or spy_dd < C.SPY_FLUSH_DAYS:
+        st.markdown('<div style="background:#1f2937;color:#9ca3af;padding:14px;border-radius:8px;">'
+                    f'<b>Not armed</b> — SPY not stretched down (dd_days = {spy_dd if spy_dd is not None else "N/A"}, '
+                    f'need ≥ {C.SPY_FLUSH_DAYS}).</div>', unsafe_allow_html=True)
+        return
+    st.caption(f"**Doji Snapback** — armed (SPY dd_days = {spy_dd}). Leader holding support printing a doji.")
+    cols = ["symbol","status","close","spy_dd_days","doji_body_ratio","close_position","vol_ratio",
+            "dist_20ema_ATR","rs_63d","sector","doji_low","reclaim_level","next_earnings","earnings_blackout"]
+    df = doji_df[[c for c in cols if c in doji_df.columns]] if not doji_df.empty else doji_df
+    _screener_table(df, {"doji_low": "doji_low (stop)"}, signed_cols=["dist_20ema_ATR","rs_63d"])
+    st.caption(f"Doji: body/range ≤ {C.DOJI_BODY_MAX}, close in upper half, range ≤ {C.DOJI_RANGE_ATR} ATR, "
+               f"volume ≤ {C.DOJI_VOL}× 20d avg. Greyed rows = earnings within 2 sessions (trigger suppressed).")
+
 # --- main ---
 def main():
     today = dt.date.today()
@@ -416,14 +535,21 @@ def main():
     render_banner(*compute_banner(today, ev, regime))
     panel_overview(con, use_date, ev, regime)
     panel_sectors(con, use_date)
+    leg_down_df, tight_df, doji_df, spy_dd, qqq_dd, leader_regime = \
+        _screen_all(C.DB_PATH, use_date, li)
+    panel_leader_macro_header(spy_dd, qqq_dd, leader_regime)
     st.divider()
-    tabs = st.tabs(["Scanner", "ETFs", "Watchlist", "Flow", "News", "Seasonality"])
-    with tabs[0]: panel_scanner(con, use_date)
-    with tabs[1]: panel_etfs(con, use_date)
-    with tabs[2]: panel_watchlist(con, use_date, ev)
-    with tabs[3]: panel_flow(con, use_date)
-    with tabs[4]: panel_news(con, use_date)
-    with tabs[5]: panel_seasonality(con, use_date)
+    tabs = st.tabs(["Leg Down", "Tightness", "Doji Snapback",
+                    "Scanner", "ETFs", "Watchlist", "Flow", "News", "Seasonality"])
+    with tabs[0]: panel_leg_down(leg_down_df)
+    with tabs[1]: panel_tightness(tight_df)
+    with tabs[2]: panel_doji(doji_df, spy_dd)
+    with tabs[3]: panel_scanner(con, use_date)
+    with tabs[4]: panel_etfs(con, use_date)
+    with tabs[5]: panel_watchlist(con, use_date, ev)
+    with tabs[6]: panel_flow(con, use_date)
+    with tabs[7]: panel_news(con, use_date)
+    with tabs[8]: panel_seasonality(con, use_date)
     con.close()
 
 if __name__ == "__main__":

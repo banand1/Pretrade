@@ -290,7 +290,11 @@ def run(today=None):
     upsert(con, "options_oi", pd.DataFrame(orow), ["snapshot_date","symbol","expiry","strike","type"], OPT_COLS)
     upsert(con, "iv_atm", pd.DataFrame(ivrow), ["symbol","date"], IVATM_COLS)
 
-    erow = [{"symbol": s, "next_earnings": ed} for s in C.WATCHLIST if (ed := fetch_earnings(s))]
+    # Full screener universe (not just WATCHLIST) so the leader screeners' earnings
+    # blackout rule works for scanner tickers too. Sequential network calls — slow on
+    # ~90 symbols but only runs once per pre-market ingest.
+    erow = [{"symbol": s, "next_earnings": ed} for s in sorted(set(C.WATCHLIST) | set(C.SCREENER_UNIVERSE))
+            if (ed := fetch_earnings(s))]
     upsert(con, "earnings", pd.DataFrame(erow), ["symbol"], EARN_COLS)
 
     frow = [{**f, "snapshot_date": today} for f in fetch_fear_greed()]
