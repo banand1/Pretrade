@@ -33,8 +33,8 @@ SECTOR_ETF = {
 # Names that are not operating common stocks even though they sit in the stocks feed.
 _EXCLUDE_NAME = re.compile(
     r"\b(?:warrant|warrants|unit|units|right|rights|preferred|depositary|notes?|debentures?|"
-    r"acquisition corp|acquisition corporation|acquisition co\b|SPAC|trust|fund|ETF|ETN|"
-    r"\d+(?:\.\d+)?%)", re.I)
+    r"acquisition corp|acquisition corporation|acquisition co|SPAC|trust|fund|ETF|ETN|"
+    r"\d+(?:\.\d+)?%)\b", re.I)   # trailing \b: 'unit' must not match Unity / United
 _BAD_SYMBOL = re.compile(r"[^A-Z]")          # keep plain tickers only (no ^ / . - suffixes)
 
 UNIVERSE_COLS = ["as_of", "symbol", "name", "sector", "industry", "country",

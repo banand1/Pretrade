@@ -51,6 +51,18 @@ def test_qualify_sorted_by_liquidity_and_deduped():
     assert q.symbol.is_unique
 
 
+def test_exclusion_regex_needs_whole_words():
+    keep = ["Unity Software Inc. Common Stock", "UnitedHealth Group Incorporated Common Stock",
+            "United Airlines Holdings Inc. Common Stock", "Trustmark Corporation Common Stock",
+            "Bright Horizons Family Solutions Inc. Common Stock", "Fundamental Global Inc. Common Stock"]
+    drop = ["Good Co. Warrants", "Fresh Acquisition Corp Class A", "Bank 6.25% Preferred Stock Series C",
+            "Real Estate Income Trust", "XYZ Fund Inc.", "Acme Class A Units", "Acme Rights"]
+    for n in keep:
+        assert not U._EXCLUDE_NAME.search(n), n
+    for n in drop:
+        assert U._EXCLUDE_NAME.search(n), n
+
+
 def test_parse_rows_tolerates_missing_values():
     df = U.parse_rows([{"symbol": "NA1", "name": "x", "lastsale": "NA", "volume": None,
                         "marketCap": "", "country": "", "sector": ""}])
