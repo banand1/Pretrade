@@ -4,6 +4,7 @@ import datetime as dt, os, subprocess, sys
 import altair as alt, duckdb, pandas as pd, streamlit as st
 import config as C, market_calendar as mc
 import screeners as scr
+import call_setups
 
 st.set_page_config(page_title="Pre-Trade Dashboard", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -546,7 +547,8 @@ def main():
         panel_leader_macro_header(spy_dd, qqq_dd, leader_regime)
         st.divider()
         tabs = st.tabs(["Leg Down", "Tightness", "Doji Snapback",
-                        "Scanner", "ETFs", "Watchlist", "Flow", "News", "Seasonality"])
+                        "Scanner", "ETFs", "Watchlist", "Flow", "News", "Seasonality",
+                        "Call Setups"])
         with tabs[0]: panel_leg_down(leg_down_df)
         with tabs[1]: panel_tightness(tight_df)
         with tabs[2]: panel_doji(doji_df, spy_dd)
@@ -556,6 +558,7 @@ def main():
         with tabs[6]: panel_flow(con, use_date)
         with tabs[7]: panel_news(con, use_date)
         with tabs[8]: panel_seasonality(con, use_date)
+        with tabs[9]: call_setups.render()
     finally:
         if not con_closed: con.close()
 
