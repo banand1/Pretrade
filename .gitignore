@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 pretrade.duckdb
 pretrade.duckdb.wal
+*.log
