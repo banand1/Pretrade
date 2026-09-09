@@ -8,13 +8,27 @@ stack top-to-bottom and answers "do I trade today, and what?" before the open. P
 Streamlit + DuckDB. No paid data, no API keys.
 
 ## File map
-- `config.py` — the only file the user edits: tickers, watchlist, thresholds, RSS feeds, F&G URL.
+- `config.py` — the only file the user edits: tickers, watchlist, thresholds, RSS feeds, F&G URL,
+  `MIN_PRICE` and the `UNIVERSE_*` liquidity gates.
+- `universe.py` — dynamic US-stock universe from NASDAQ's keyless screener feed (price, volume,
+  market cap, sector, country). `qualify()` keeps liquid US operating companies >= MIN_PRICE
+  (~1,600 names); stored in the `universe` table by ingest. `symbols(con)` = curated lists ∪
+  latest universe and is what every screen iterates. `sector_lookup(con)` maps NASDAQ sectors to
+  SPDR ETFs for the leader gate.
 - `market_calendar.py` — holiday-aware expiry + macro-event logic on the real NYSE calendar
   (pandas_market_calendars). FOMC dates are hardcoded in `FOMC_DECISIONS` (2026 verified, 2027 tentative).
 - `ingest.py` — pre-market job. Pulls data, computes metrics, snapshots to DuckDB. Pure compute
   functions are separated from network fetchers.
-- `dashboard.py` — Streamlit UI. Reads DuckDB **read-only**, renders 8 panels + a GO/CAUTION/
-  STAND-DOWN banner, has a "Run ingest now" button (shells out to ingest.py).
+- `dashboard.py` — Streamlit UI. Reads DuckDB **read-only**, renders the panels + a GO/CAUTION/
+  STAND-DOWN banner. Header buttons: "Run ingest now" (shells out to ingest.py), "Tight flags"
+  (in-process scan of the screener universe), "Build brief" (shells out to daily_brief.py).
+- `exhaustion_trigger.py` — pure leg-down exhaustion signal (leader ctx + leg down + 1+ tight/doji
+  days) with backtest + CLI. `call_setups.py` wraps it as the "Call Setups" tab and holds the
+  shared `tight_flags()` / `load_panel_from_con()` helpers (no dashboard import — avoids a cycle).
+- `daily_brief.py` — on-demand / CLI brief. `--ingest` runs ingest.py first; writes
+  `briefs/YYYY-MM-DD.md` (banner, data-quality checks, tight flags, call setups, leader screens,
+  watchlist) by importing the dashboard's pure helpers headlessly. Read-only on the DB. Run it as
+  a subprocess from the dashboard, never import it there (it imports dashboard).
 - `requirements.txt`, `README.md`.
 
 ## Run
@@ -26,8 +40,8 @@ streamlit run dashboard.py
 ```
 
 ## Architecture / conventions (do not break)
-- **One DuckDB store, two surfaces.** `ingest.py` is the only writer; `dashboard.py` opens
-  `read_only=True`. Schedule ingest via cron/launchd pre-market (see README).
+- **One DuckDB store, several readers.** `ingest.py` is the only writer; `dashboard.py`,
+  `call_setups.py` and `daily_brief.py` open `read_only=True`. Schedule ingest via cron/launchd pre-market (see README).
 - **Upsert depends on column order.** `ingest.upsert()` does `INSERT INTO t SELECT * FROM df`,
   so each DataFrame's columns MUST match the `CREATE TABLE` order. The `*_COLS` constants in
   ingest.py (PRICE_COLS, SNAP_COLS, YIELD_COLS, OPT_COLS, IVATM_COLS, NEWS_COLS, EARN_COLS,
@@ -35,7 +49,12 @@ streamlit run dashboard.py
   and the row dicts together.
 - **Compute functions are pure and unit-tested** (compute_price_metrics, _pullback, iv_rank,
   atm_iv_from_chain, normalize_yield). Keep them pure — no I/O — so they stay testable offline.
-- **Tables:** prices, snapshot, yields, options_oi, iv_atm, earnings, sentiment, news, meta.
+- **Tables:** prices, snapshot, yields, options_oi, iv_atm, earnings, sentiment, news, meta, universe.
+- **Two tiers of symbols.** Curated config lists (~108 incl. indices/ETFs/futures) get the full
+  HIST_DAYS pull every run and feed snapshot/regime/options/earnings. The dynamic universe gets
+  prices only: full history the first time a symbol appears (<300 bars stored), a 15-day
+  incremental top-up after that. Earnings blackout therefore only applies to curated names;
+  universe names show `next_earnings` = None.
 
 ## Data sources & their limits
 - **yfinance** — prices, ^VIX, treasury proxies (^IRX/^FVX/^TNX/^TYX, auto-normalized for legacy
@@ -46,6 +65,8 @@ streamlit run dashboard.py
   User-Agent header (set in `fetch_fear_greed`). Returns `fear_and_greed` headline + 7 components.
   If it 403s or the shape changes, the panel shows "—" and the banner drops the sentiment line.
 - **Google News RSS** — keyless; keyword-scored in `fetch_news`.
+- **NASDAQ screener feed** (`universe.SCREENER_URL`) — keyless, needs a browser User-Agent. ~7k rows
+  for all US-listed stocks. If it fails, ingest falls back to the last stored universe.
 - `DRAM` has no liquid US ETF on Yahoo — expected to return empty; MU/SMH/SOXX are the proxies.
 - **IV rank** needs ~30 daily snapshots to populate; **OI delta** needs ≥2 daily snapshots.
 - NFP is computed (first Friday, auto-shifts off a closed Friday); CPI/PPI/PCE are NOT fabricated —

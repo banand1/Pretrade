@@ -418,7 +418,7 @@ def regime_tag(ema50_rising: bool | None, ad_diverging_market: bool) -> str:
 # orchestration — builds the shared leader universe once per run
 # --------------------------------------------------------------------------- #
 def build_universe(prices_map: dict[str, pd.DataFrame], sector_prices_map: dict[str, pd.DataFrame],
-                    spy_df: pd.DataFrame | None = None) -> dict[str, dict]:
+                    spy_df: pd.DataFrame | None = None, sector_of=None) -> dict[str, dict]:
     """prices_map: {symbol: OHLCV df (date,open,high,low,close,volume) ascending}.
     sector_prices_map: same shape, keyed by sector ETF symbol (e.g. 'XLK').
     spy_df: SPY's OHLCV, used to compute sector_RS = sector's 20d return vs SPY's 20d
@@ -443,9 +443,13 @@ def build_universe(prices_map: dict[str, pd.DataFrame], sector_prices_map: dict[
                      for s, r in sector_ret20.items()}
 
     out = {}
+    min_price = getattr(C, "MIN_PRICE", 0.0)
+    sector_of = sector_of or C.sector_of
     for sym, raw in prices_map.items():
         d = compute_indicators(raw)
-        sector = C.sector_of(sym)
+        if d is not None and len(d) and float(d["close"].iloc[-1]) < min_price:
+            continue                      # price floor: not screened at all
+        sector = sector_of(sym)
         is_leader, diag = leader_gate(d, sector_ret63.get(sector), sector_ret126.get(sector))
         out[sym] = {"d": d, "leader": is_leader, "sector": sector,
                     "sector_RS": sector_rs_map.get(sector), **diag}

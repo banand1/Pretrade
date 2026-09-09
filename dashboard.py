@@ -5,6 +5,7 @@ import altair as alt, duckdb, pandas as pd, streamlit as st
 import config as C, market_calendar as mc
 import screeners as scr
 import call_setups
+import universe as U
 
 st.set_page_config(page_title="Pre-Trade Dashboard", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -38,6 +39,53 @@ def run_ingest_button(label="Run ingest now", con=None):
         if r.returncode == 0: st.rerun()
         return con is not None
     return False
+
+def build_brief_button(label="Build brief"):
+    """On-demand: runs daily_brief.py (read-only on the DB) in a subprocess and
+    keeps the markdown in session_state so it survives reruns."""
+    if st.button(label):
+        with st.spinner("Building brief…"):
+            r = subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "daily_brief.py")],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace")
+        path = next((ln.split("] ", 1)[1] for ln in (r.stdout or "").splitlines()
+                     if ln.startswith("[written] ")), None)
+        if r.returncode == 0 and path and os.path.exists(path):
+            st.session_state["brief_md"] = open(path, encoding="utf-8").read()
+            st.session_state["brief_path"] = path
+        else:
+            st.session_state["brief_md"] = None
+            st.error("Brief failed."); st.code((r.stdout or "")[-3000:] + (r.stderr or "")[-3000:], language="text")
+
+@st.cache_data(show_spinner="Scanning universe for tight bars…")
+def _tight_scan(db_path, use_date, last_ingest_ts):
+    """Cached per ingest: one vectorised pass over the whole stored universe."""
+    con2 = duckdb.connect(db_path, read_only=True)
+    try: panel = call_setups.load_panel_from_con(con2, U.symbols(con2))
+    finally: con2.close()
+    return call_setups.tight_flags(panel)
+
+def tight_flags_button(use_date, last_ingest_ts, label="Tight flags"):
+    """On-demand: every US stock >= MIN_PRICE whose last bar is tight (NR / inside / doji)."""
+    if st.button(label):
+        st.session_state["tight_df"] = _tight_scan(C.DB_PATH, use_date, last_ingest_ts)
+
+def render_on_demand():
+    df = st.session_state.get("tight_df")
+    if df is not None:
+        with st.expander(f"Tight flags — {len(df)} symbols · "
+                         f"{int(df.signal.sum()) if len(df) else 0} full call-setup signals", expanded=True):
+            if len(df):
+                only = st.checkbox("Leaders in a leg-down only", value=False, key="tight_only_leaders")
+                show = df[df.leader_ctx & df.leg_down] if only else df
+                st.dataframe(show, use_container_width=True, hide_index=True, height=min(600, 40 + 35 * len(show)))
+            else: st.info("No tight last bars in the stored universe.")
+            st.caption("NR = range ≤ 0.6×ATR20 · inside = inside prior bar · doji = body ≤ 15% of range · "
+                       "leader_ctx + leg_down + tight = full Call Setups signal")
+    md = st.session_state.get("brief_md")
+    if md:
+        with st.expander("Pre-market brief", expanded=True):
+            st.download_button("Download .md", md, os.path.basename(st.session_state["brief_path"]))
+            st.markdown(md)
 
 # --- banner logic ---
 def gather_events(today):
@@ -253,8 +301,8 @@ def panel_watchlist(con, today, ev):
                s.pullback_flag, s.setup_score, iv.atm_iv, e.next_earnings
         FROM snapshot s LEFT JOIN iv_atm iv ON iv.symbol=s.symbol AND iv.date=s.snapshot_date
         LEFT JOIN earnings e ON e.symbol=s.symbol
-        WHERE s.snapshot_date=? AND s.kind='watch'
-        ORDER BY s.setup_score DESC, s.off_high20_pct ASC""", [today])
+        WHERE s.snapshot_date=? AND s.kind='watch' AND s.close >= ?
+        ORDER BY s.setup_score DESC, s.off_high20_pct ASC""", [today, C.MIN_PRICE])
     if df.empty: st.caption("— no data —"); return
     from ingest import iv_rank, realized_vol
     # IV rank
@@ -350,20 +398,21 @@ def panel_seasonality(con, today):
         _season_chart(df, "dow", DA, list(DA.values()), today.weekday(), "DOW")
     st.caption(f"{len(df)} trading days · Blue = current. Accumulates with each ingest.")
 
-def panel_scanner(con, today):
-    st.caption("**Swing scanner — OHLCV + signals (3 months)**")
-    # all scanner + watchlist symbols
-    syms = sorted(set(C.SCANNER_TICKERS + C.WATCHLIST))
+@st.cache_data(show_spinner="Scanning universe…")
+def _scanner_frame(db_path, today, last_ingest_ts):
+    """Cached: 3-month OHLCV + swing signals for the whole screen universe."""
+    con2 = duckdb.connect(db_path, read_only=True)
+    syms = U.symbols(con2)
     placeholders = ",".join(["?"] * len(syms))
-    df = q(con, f"SELECT symbol, date, open, high, low, close, volume FROM prices "
-               f"WHERE symbol IN ({placeholders}) ORDER BY symbol, date", syms)
-    if df.empty: st.caption("— no data — run ingest first"); return
+    df = q(con2, f"SELECT symbol, date, open, high, low, close, volume FROM prices "
+                 f"WHERE symbol IN ({placeholders}) ORDER BY symbol, date", syms)
+    con2.close()
+    if df.empty: return pd.DataFrame()
     df["date"] = pd.to_datetime(df["date"])
-    # compute signals per symbol
     rows = []
     for sym, g in df.groupby("symbol"):
         g = g.sort_values("date").tail(63)  # 3 months
-        if len(g) < 2: continue
+        if len(g) < 2 or g["close"].iloc[-1] < C.MIN_PRICE: continue
         g = g.copy()
         g["range"] = (g["high"] - g["low"]).round(2)
         g["%chg"] = (g["close"].pct_change() * 100).round(2)
@@ -376,8 +425,13 @@ def panel_scanner(con, today):
         g["vs20"] = ((g["close"] - sma20) / sma20 * 100).round(1)
         g["vs50"] = ((g["close"] - sma50) / sma50 * 100).round(1)
         rows.append(g)
-    if not rows: st.caption("— no data —"); return
-    all_df = pd.concat(rows)
+    return pd.concat(rows) if rows else pd.DataFrame()
+
+def panel_scanner(con, today, last_ingest_ts=None):
+    st.caption("**Swing scanner — OHLCV + signals (3 months)**")
+    all_df = _scanner_frame(C.DB_PATH, today, last_ingest_ts)
+    if all_df.empty: st.caption("— no data — run ingest first"); return
+    st.caption(f"{all_df['symbol'].nunique()} US stocks ≥ ${C.MIN_PRICE:.0f}")
     # view mode: latest day summary or per-symbol history
     view = st.radio("View", ["Latest day (all tickers)", "History (pick symbol)"],
                     horizontal=True, label_visibility="collapsed")
@@ -409,7 +463,9 @@ def _screen_all(db_path, use_date, last_ingest_ts):
     """Cached: recomputes only when the DB path, snapshot date, or last-ingest
     timestamp changes (i.e. after a fresh ingest), not on every Streamlit rerun."""
     con2 = duckdb.connect(db_path, read_only=True)
-    all_syms = sorted(set(C.SCREENER_UNIVERSE) | {"SPY", "QQQ"} | set(C.SECTORS))
+    screen_syms = U.symbols(con2)
+    sec_lookup = U.sector_lookup(con2)
+    all_syms = sorted(set(screen_syms) | {"SPY", "QQQ"} | set(C.SECTORS))
     ph = ",".join(["?"] * len(all_syms))
     prices_df = con2.execute(f"SELECT symbol,date,open,high,low,close,volume FROM prices "
                               f"WHERE symbol IN ({ph}) ORDER BY symbol,date", all_syms).fetchdf()
@@ -422,10 +478,11 @@ def _screen_all(db_path, use_date, last_ingest_ts):
     prices_map = {s: g.drop(columns="symbol").reset_index(drop=True) for s, g in prices_df.groupby("symbol")}
     sector_prices_map = {s: prices_map[s] for s in C.SECTORS if s in prices_map}
     spy_df, qqq_df = prices_map.get("SPY"), prices_map.get("QQQ")
-    universe_prices = {s: prices_map[s] for s in C.SCREENER_UNIVERSE if s in prices_map}
+    universe_prices = {s: prices_map[s] for s in screen_syms if s in prices_map}
     earnings = {r.symbol: _to_date(r.next_earnings) for r in earn_df.itertuples() if pd.notna(r.next_earnings)}
 
-    universe = scr.build_universe(universe_prices, sector_prices_map, spy_df=spy_df)
+    universe = scr.build_universe(universe_prices, sector_prices_map, spy_df=spy_df,
+                                  sector_of=lambda s: sec_lookup.get(s) or C.sector_of(s))
     spy_dd = scr.dd_days(spy_df["close"]) if spy_df is not None else None
     qqq_dd = scr.dd_days(qqq_df["close"]) if qqq_df is not None else None
 
@@ -529,14 +586,18 @@ def main():
     con_closed = False
     try:
         li, snap_date = last_ingest(con), latest_snapshot_date(con)
-        top = st.columns([3, 1])
+        use_date = snap_date or today
+        top = st.columns([3, 1, 1, 1])
         with top[0]:
-            if li: st.caption(f"Last ingest: **{li}**" + (f" · data **{snap_date}**" if snap_date else ""))
+            if li: st.caption(f"Last ingest: **{li}**" + (f" · data **{snap_date}**" if snap_date else "")
+                              + f" · universe **{len(U.symbols(con))}** US stocks ≥ ${C.MIN_PRICE:.0f}")
             if snap_date and snap_date != today:
                 st.info(f"Showing {snap_date}; today's ingest hasn't run.")
         with top[1]: con_closed = run_ingest_button(con=con)
         if con_closed: return  # ingest failed without rerunning; con is already closed
-        use_date = snap_date or today
+        with top[2]: tight_flags_button(use_date, li)
+        with top[3]: build_brief_button()
+        render_on_demand()
         ev = gather_events(today)
         regime = _regime_vals(con, use_date)
         render_banner(*compute_banner(today, ev, regime))
@@ -552,7 +613,7 @@ def main():
         with tabs[0]: panel_leg_down(leg_down_df)
         with tabs[1]: panel_tightness(tight_df)
         with tabs[2]: panel_doji(doji_df, spy_dd)
-        with tabs[3]: panel_scanner(con, use_date)
+        with tabs[3]: panel_scanner(con, use_date, li)
         with tabs[4]: panel_etfs(con, use_date)
         with tabs[5]: panel_watchlist(con, use_date, ev)
         with tabs[6]: panel_flow(con, use_date)

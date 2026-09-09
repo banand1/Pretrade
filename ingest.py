@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse, datetime as dt, sys, time, warnings
 import duckdb, numpy as np, pandas as pd
 import config as C
+import universe as U
 
 warnings.filterwarnings("ignore")
 
@@ -153,12 +154,25 @@ def _extract(all_df, ticker):
     d.columns = [str(c).lower() for c in d.columns]
     return d[[c for c in ["open","high","low","close","volume"] if c in d.columns]].dropna(how="all")
 
-def fetch_prices(symbols):
+def fetch_prices(symbols, period=None, batch=300):
+    """Batched yfinance pull. `period` defaults to the full HIST_DAYS lookback; pass
+    e.g. "15d" for an incremental top-up of symbols that already have history."""
     import yfinance as yf
-    syms = sorted(set(symbols))
-    raw = yf.download(syms, period=f"{C.HIST_DAYS}d", interval="1d",
-                      group_by="ticker", auto_adjust=True, threads=True, progress=False)
-    return {s: d for s in syms if not (d := _extract(raw, s)).empty}
+    syms, out = sorted(set(symbols)), {}
+    period = period or f"{C.HIST_DAYS}d"
+    for i in range(0, len(syms), batch):
+        chunk = syms[i:i + batch]
+        try:
+            raw = yf.download(chunk, period=period, interval="1d", group_by="ticker",
+                              auto_adjust=True, threads=True, progress=False)
+        except Exception as e:
+            print(f"  ! prices batch {i//batch+1} failed: {e}", file=sys.stderr); continue
+        out.update({s: d for s in chunk if not (d := _extract(raw, s)).empty})
+    return out
+
+def bars_per_symbol(con) -> dict:
+    try: return dict(con.execute("SELECT symbol, count(*) FROM prices GROUP BY symbol").fetchall())
+    except Exception: return {}
 
 def fetch_options(symbol):
     import yfinance as yf
@@ -260,19 +274,34 @@ def kind_of(sym):
 def run(today=None):
     today = today or dt.date.today()
     con = connect(); create_tables(con)
+    # Curated symbols (indices, VIX, yields, futures, sectors, ETFs, watchlist, scanner) always
+    # get the full lookback: they feed the snapshot/regime panels which need 200+ bars in memory.
     universe = (list(C.INDICES) + [C.VIX] + list(C.YIELDS) + list(C.FUTURES)
                 + list(C.SECTORS) + C.PULLBACK_ETFS + C.WATCHLIST + C.SCANNER_TICKERS)
-    print(f"[{today}] fetching {len(set(universe))} symbols ...")
+    # Dynamic universe (US stocks >= MIN_PRICE, liquid): full history the first time a symbol
+    # shows up, a short incremental top-up after that. prices' PK makes the upsert idempotent.
+    dyn = U.refresh(con, today)
+    dyn_syms = sorted(set(dyn["symbol"]) - set(universe)) if not dyn.empty else []
+    have = bars_per_symbol(con)
+    dyn_full = [s for s in dyn_syms if have.get(s, 0) < 300]
+    dyn_incr = [s for s in dyn_syms if have.get(s, 0) >= 300]
+    print(f"[{today}] fetching {len(set(universe))} curated + {len(dyn_full)} new + "
+          f"{len(dyn_incr)} incremental universe symbols ...")
     prices = fetch_prices(universe)
     missing = sorted(set(universe) - set(prices))
     if missing: print(f"  no data for: {', '.join(missing)}")
+    dyn_prices = fetch_prices(dyn_full)
+    dyn_prices.update(fetch_prices(dyn_incr, period="15d"))
+    if dyn_syms: print(f"  universe prices: {len(dyn_prices)}/{len(dyn_syms)} symbols")
 
-    prow = [{"symbol": s, "date": pd.to_datetime(idx).date(),
-             "open": _f(r.get("open")), "high": _f(r.get("high")),
-             "low": _f(r.get("low")), "close": _f(r.get("close")),
-             "volume": int(r.get("volume") or 0)}
-            for s, d in prices.items() for idx, r in d.iterrows()]
-    upsert(con, "prices", pd.DataFrame(prow), ["symbol","date"], PRICE_COLS)
+    def _rows(pm):
+        return [{"symbol": s, "date": pd.to_datetime(idx).date(),
+                 "open": _f(r.get("open")), "high": _f(r.get("high")),
+                 "low": _f(r.get("low")), "close": _f(r.get("close")),
+                 "volume": int(r.get("volume") or 0)}
+                for s, d in pm.items() for idx, r in d.iterrows()]
+    upsert(con, "prices", pd.DataFrame(_rows(prices)), ["symbol","date"], PRICE_COLS)
+    upsert(con, "prices", pd.DataFrame(_rows(dyn_prices)), ["symbol","date"], PRICE_COLS)
 
     srow = []
     for s, d in prices.items():

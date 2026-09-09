@@ -26,6 +26,66 @@ DB = dict(
 )
 
 
+def load_panel_from_con(con, universe: list[str]) -> pd.DataFrame:
+    """OHLCV panel for `universe` from an open (read-only) DuckDB connection."""
+    ph = ",".join("?" * len(universe))
+    panel = con.execute(
+        "SELECT symbol AS ticker, date, open, high, low, close, volume FROM prices "
+        f"WHERE symbol IN ({ph}) ORDER BY symbol, date", list(universe)).df()
+    if not panel.empty:
+        panel["date"] = pd.to_datetime(panel["date"])
+    return panel
+
+
+def params(**overrides) -> dict:
+    """exhaustion_trigger.P with the project price floor applied."""
+    p = dict(et.P); p["min_price"] = max(p["min_price"], getattr(C, "MIN_PRICE", 0.0))
+    p.update(overrides); return p
+
+
+FLAG_COLS = ["ticker", "close", "tight_run", "rng_vs_atr", "nr", "inside", "doji",
+             "leader_ctx", "leg_down", "signal", "entry", "stop"]
+HIT_COLS = ["ticker", "close", "tight_run", "doji", "dfly", "inside", "entry", "stop"]
+
+
+def scan(panel: pd.DataFrame, p=None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """One vectorised pass over the panel -> (tight_flags, call_setup_hits).
+
+    tight_flags: every symbol >= the price floor whose last bar is tight (NR / inside /
+    doji), with leader_ctx / leg_down / signal so near-misses sit next to full signals.
+    hits: the rows where signal is True, in todays_hits() layout (entry / stop)."""
+    p = p or params()
+    if panel.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    d = et.annotate_panel(panel, p)
+    if d.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    # leg_down "recently" = any leg bar in the last 4 sessions (matches the old per-symbol scan)
+    leg4 = d.leg.astype(int).groupby(d.ticker).rolling(4, min_periods=1).max().reset_index(level=0, drop=True)
+    d["leg_down"] = leg4.astype(bool)
+    last = d.groupby("ticker").tail(1)
+    last = last[(last.close >= p["min_price"]) & (last.tight_run >= 1)]
+    if last.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    flags = pd.DataFrame({
+        "ticker": last.ticker.values, "close": last.close.round(2).values,
+        "tight_run": last.tight_run.astype(int).values,
+        "rng_vs_atr": ((last.high - last.low) / last.atr20).round(2).values,
+        "nr": last.nr.astype(bool).values, "inside": last.inside.astype(bool).values,
+        "doji": last.doji.astype(bool).values, "leader_ctx": last.ctx.astype(bool).values,
+        "leg_down": last.leg_down.values, "signal": last.signal.astype(bool).values,
+        "entry": (last.high + 0.01).round(2).values, "stop": (last.low - 0.01).round(2).values,
+        "dfly": last.dfly.astype(bool).values,
+    }).sort_values(["signal", "leader_ctx", "leg_down", "tight_run", "ticker"],
+                   ascending=[False, False, False, False, True]).reset_index(drop=True)
+    hits = flags[flags.signal][HIT_COLS].reset_index(drop=True)
+    return flags[FLAG_COLS], hits
+
+
+def tight_flags(panel: pd.DataFrame, p=None) -> pd.DataFrame:
+    return scan(panel, p)[0]
+
+
 @st.cache_data(ttl=3600)
 def load_panel(tickers: tuple[str, ...]) -> pd.DataFrame:
     try:
@@ -53,7 +113,7 @@ def load_panel(tickers: tuple[str, ...]) -> pd.DataFrame:
 def render():
     st.subheader("Call Setups — leg-down exhaustion on leaders")
     with st.expander("Call Setups params", expanded=False):
-        p = dict(et.P)
+        p = params()
         p["nr_frac"] = st.slider("Tight day: range ≤ x·ATR20", 0.3, 0.9, p["nr_frac"], 0.05)
         p["min_tight_run"] = st.slider("Min consecutive tight days", 1, 4, p["min_tight_run"])
         p["down_days"] = st.slider("Red days in last 4", 2, 4, p["down_days"])
@@ -62,8 +122,16 @@ def render():
         p["min_dollar_vol"] = st.number_input("Min avg $vol (M)", 10, 500, int(p["min_dollar_vol"] / 1e6)) * 1e6
 
     default_wl = "CRWD,AVGO,ANET,PANW,TENB,QLYS,S,TOST,BRZE,NBIS,CRWV,IREN,APLD,OKLO,RGTI"
-    raw = st.text_area("Universe (comma/space separated, or paste DeepVue export)", default_wl, height=80)
-    tickers = tuple(sorted({t.strip().upper() for t in raw.replace("\n", ",").replace(" ", ",").split(",") if t.strip()}))
+    use_all = st.checkbox("Scan the full stored universe (all US stocks ≥ price floor)", value=True)
+    if use_all:
+        import universe as U
+        con = duckdb.connect(DB["path"], read_only=True)
+        try: tickers = tuple(U.symbols(con))
+        finally: con.close()
+        st.caption(f"{len(tickers)} symbols")
+    else:
+        raw = st.text_area("Universe (comma/space separated, or paste DeepVue export)", default_wl, height=80)
+        tickers = tuple(sorted({t.strip().upper() for t in raw.replace("\n", ",").replace(" ", ",").split(",") if t.strip()}))
     if not tickers:
         return
     panel = load_panel(tickers)
@@ -71,27 +139,16 @@ def render():
         st.error("No OHLCV data for the universe.")
         return
 
-    hits = et.todays_hits(panel, p)
+    flags, hits = scan(panel, p)
     if len(hits):
         st.dataframe(hits, use_container_width=True, hide_index=True)
         st.caption("entry = break of tight-day high · stop = tight-day low · size per your 0.25–0.50% premium rule")
     else:
-        st.info("No signals today. Watchlist below shows who's closest.")
-        # nearest-miss table: leaders in a leg down, tightness building
-        rows = []
-        for tkr, g in panel.groupby("ticker"):
-            g = g.set_index("date")[["open", "high", "low", "close", "volume"]].astype(float)
-            if len(g) < 260:
-                continue
-            d = et.annotate(g, p)
-            r = d.iloc[-1]
-            if r.ctx and d.leg.iloc[-4:].any():
-                rows.append(dict(ticker=tkr, close=round(r.close, 2),
-                                 tight_run=int(r.tight_run),
-                                 rng_vs_atr=round((r.high - r.low) / r.atr20, 2) if r.atr20 else None))
-        if rows:
-            st.dataframe(pd.DataFrame(rows).sort_values("rng_vs_atr"),
-                         use_container_width=True, hide_index=True)
+        st.info("No signals today. Nearest misses below: leaders in a leg-down with a tight last bar.")
+    near = flags[flags.leader_ctx & flags.leg_down & ~flags.signal] if len(flags) else pd.DataFrame()
+    if len(near):
+        with st.expander(f"Nearest misses — {len(near)}", expanded=not len(hits)):
+            st.dataframe(near.drop(columns=["signal"]), use_container_width=True, hide_index=True)
 
     if st.button("Backtest universe (run locally, not on Cloud)"):
         with st.spinner("Backtesting…"):
