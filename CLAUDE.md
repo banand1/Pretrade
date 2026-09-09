@@ -13,8 +13,16 @@ Streamlit + DuckDB. No paid data, no API keys.
   (pandas_market_calendars). FOMC dates are hardcoded in `FOMC_DECISIONS` (2026 verified, 2027 tentative).
 - `ingest.py` — pre-market job. Pulls data, computes metrics, snapshots to DuckDB. Pure compute
   functions are separated from network fetchers.
-- `dashboard.py` — Streamlit UI. Reads DuckDB **read-only**, renders 8 panels + a GO/CAUTION/
-  STAND-DOWN banner, has a "Run ingest now" button (shells out to ingest.py).
+- `dashboard.py` — Streamlit UI. Reads DuckDB **read-only**, renders the panels + a GO/CAUTION/
+  STAND-DOWN banner. Header buttons: "Run ingest now" (shells out to ingest.py), "Tight flags"
+  (in-process scan of the screener universe), "Build brief" (shells out to daily_brief.py).
+- `exhaustion_trigger.py` — pure leg-down exhaustion signal (leader ctx + leg down + 1+ tight/doji
+  days) with backtest + CLI. `call_setups.py` wraps it as the "Call Setups" tab and holds the
+  shared `tight_flags()` / `load_panel_from_con()` helpers (no dashboard import — avoids a cycle).
+- `daily_brief.py` — on-demand / CLI brief. `--ingest` runs ingest.py first; writes
+  `briefs/YYYY-MM-DD.md` (banner, data-quality checks, tight flags, call setups, leader screens,
+  watchlist) by importing the dashboard's pure helpers headlessly. Read-only on the DB. Run it as
+  a subprocess from the dashboard, never import it there (it imports dashboard).
 - `requirements.txt`, `README.md`.
 
 ## Run
@@ -26,8 +34,8 @@ streamlit run dashboard.py
 ```
 
 ## Architecture / conventions (do not break)
-- **One DuckDB store, two surfaces.** `ingest.py` is the only writer; `dashboard.py` opens
-  `read_only=True`. Schedule ingest via cron/launchd pre-market (see README).
+- **One DuckDB store, several readers.** `ingest.py` is the only writer; `dashboard.py`,
+  `call_setups.py` and `daily_brief.py` open `read_only=True`. Schedule ingest via cron/launchd pre-market (see README).
 - **Upsert depends on column order.** `ingest.upsert()` does `INSERT INTO t SELECT * FROM df`,
   so each DataFrame's columns MUST match the `CREATE TABLE` order. The `*_COLS` constants in
   ingest.py (PRICE_COLS, SNAP_COLS, YIELD_COLS, OPT_COLS, IVATM_COLS, NEWS_COLS, EARN_COLS,

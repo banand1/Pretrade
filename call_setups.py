@@ -26,6 +26,42 @@ DB = dict(
 )
 
 
+def load_panel_from_con(con, universe: list[str]) -> pd.DataFrame:
+    """OHLCV panel for `universe` from an open (read-only) DuckDB connection."""
+    ph = ",".join("?" * len(universe))
+    panel = con.execute(
+        "SELECT symbol AS ticker, date, open, high, low, close, volume FROM prices "
+        f"WHERE symbol IN ({ph}) ORDER BY symbol, date", list(universe)).df()
+    if not panel.empty:
+        panel["date"] = pd.to_datetime(panel["date"])
+    return panel
+
+
+def tight_flags(panel: pd.DataFrame, p=et.P) -> pd.DataFrame:
+    """Every symbol whose last bar is tight (NR / inside / doji), with context.
+    Wider net than todays_hits(): a tight day on a non-leader still gets listed;
+    leader_ctx / leg_down say how close it is to a full call-setup signal."""
+    rows = []
+    for tkr, g in panel.groupby("ticker"):
+        g = g.set_index("date")[["open", "high", "low", "close", "volume"]].astype(float)
+        if len(g) < 260:
+            continue
+        d = et.annotate(g, p)
+        r = d.iloc[-1]
+        if r.tight_run >= 1:
+            rng_atr = (r.high - r.low) / r.atr20 if r.atr20 else None
+            rows.append(dict(ticker=tkr, close=round(r.close, 2), tight_run=int(r.tight_run),
+                             rng_vs_atr=round(rng_atr, 2) if rng_atr is not None else None,
+                             nr=bool(r.nr), inside=bool(r.inside), doji=bool(r.doji),
+                             leader_ctx=bool(r.ctx), leg_down=bool(d.leg.iloc[-4:].any()),
+                             signal=bool(r.signal)))
+    if not rows:
+        return pd.DataFrame()
+    return (pd.DataFrame(rows)
+            .sort_values(["signal", "leader_ctx", "leg_down", "tight_run"], ascending=False)
+            .reset_index(drop=True))
+
+
 @st.cache_data(ttl=3600)
 def load_panel(tickers: tuple[str, ...]) -> pd.DataFrame:
     try:

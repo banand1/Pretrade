@@ -39,6 +39,44 @@ def run_ingest_button(label="Run ingest now", con=None):
         return con is not None
     return False
 
+def build_brief_button(label="Build brief"):
+    """On-demand: runs daily_brief.py (read-only on the DB) in a subprocess and
+    keeps the markdown in session_state so it survives reruns."""
+    if st.button(label):
+        with st.spinner("Building brief…"):
+            r = subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "daily_brief.py")],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace")
+        path = next((ln.split("] ", 1)[1] for ln in (r.stdout or "").splitlines()
+                     if ln.startswith("[written] ")), None)
+        if r.returncode == 0 and path and os.path.exists(path):
+            st.session_state["brief_md"] = open(path, encoding="utf-8").read()
+            st.session_state["brief_path"] = path
+        else:
+            st.session_state["brief_md"] = None
+            st.error("Brief failed."); st.code((r.stdout or "")[-3000:] + (r.stderr or "")[-3000:], language="text")
+
+def tight_flags_button(con, label="Tight flags"):
+    """On-demand: scan the screener universe for tight last bars (NR / inside / doji)."""
+    if st.button(label):
+        with st.spinner("Scanning…"):
+            panel = call_setups.load_panel_from_con(con, sorted(set(C.SCREENER_UNIVERSE)))
+            st.session_state["tight_df"] = call_setups.tight_flags(panel) if not panel.empty else pd.DataFrame()
+
+def render_on_demand():
+    df = st.session_state.get("tight_df")
+    if df is not None:
+        with st.expander(f"Tight flags — {len(df)} symbols · "
+                         f"{int(df.signal.sum()) if len(df) else 0} full call-setup signals", expanded=True):
+            if len(df): st.dataframe(df, use_container_width=True, hide_index=True)
+            else: st.info("No tight last bars in the screener universe.")
+            st.caption("NR = range ≤ 0.6×ATR20 · inside = inside prior bar · doji = body ≤ 15% of range · "
+                       "leader_ctx + leg_down + tight = full Call Setups signal")
+    md = st.session_state.get("brief_md")
+    if md:
+        with st.expander("Pre-market brief", expanded=True):
+            st.download_button("Download .md", md, os.path.basename(st.session_state["brief_path"]))
+            st.markdown(md)
+
 # --- banner logic ---
 def gather_events(today):
     inw, ltq, td_left = mc.quarter_end_window(today)
@@ -529,13 +567,16 @@ def main():
     con_closed = False
     try:
         li, snap_date = last_ingest(con), latest_snapshot_date(con)
-        top = st.columns([3, 1])
+        top = st.columns([3, 1, 1, 1])
         with top[0]:
             if li: st.caption(f"Last ingest: **{li}**" + (f" · data **{snap_date}**" if snap_date else ""))
             if snap_date and snap_date != today:
                 st.info(f"Showing {snap_date}; today's ingest hasn't run.")
         with top[1]: con_closed = run_ingest_button(con=con)
         if con_closed: return  # ingest failed without rerunning; con is already closed
+        with top[2]: tight_flags_button(con)
+        with top[3]: build_brief_button()
+        render_on_demand()
         use_date = snap_date or today
         ev = gather_events(today)
         regime = _regime_vals(con, use_date)

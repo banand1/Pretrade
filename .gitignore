@@ -4,3 +4,4 @@ __pycache__/
 pretrade.duckdb
 pretrade.duckdb.wal
 *.log
+briefs/
