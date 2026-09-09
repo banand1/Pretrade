@@ -57,6 +57,7 @@ SCANNER_TICKERS = [
     "AVGO", "AMD", "MU", "QCOM", "ARM", "MRVL", "INTC", "LRCX", "AMAT",
     # Software / cloud / cyber
     "PLTR", "CRWD", "NET", "SNOW", "DDOG", "ZS", "PANW", "NOW",
+    "TENB", "QLYS", "S", "TOST", "BRZE",   # Call Setups default universe
     # AI / momentum
     "SMCI", "IONQ", "RKLB", "ANET", "DELL", "MSTR",
     # Crypto-adjacent
