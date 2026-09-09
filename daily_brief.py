@@ -19,6 +19,7 @@ import config as C
 import dashboard as D          # headless import: only the pure helpers are used
 import exhaustion_trigger as et
 import call_setups as cs
+import universe as U
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BRIEF_DIR = os.path.join(HERE, "briefs")
@@ -90,10 +91,9 @@ def build(today: dt.date, ingest_ok: bool | None, ingest_log: str) -> str:
                          "AND symbol IN (SELECT UNNEST(?)) AND close >= ? "
                          "ORDER BY setup_score DESC, symbol",
                          [use_date, list(C.WATCHLIST), C.MIN_PRICE]).df()
-        universe = sorted(set(C.SCREENER_UNIVERSE))
+        universe = U.symbols(con)
         panel = cs.load_panel_from_con(con, universe)
-        hits = et.todays_hits(panel, cs.params()) if not panel.empty else pd.DataFrame()
-        flags = cs.tight_flags(panel) if not panel.empty else pd.DataFrame()
+        flags, hits = cs.scan(panel)
         dq = data_quality(panel, snap_date)
     finally:
         con.close()
@@ -101,7 +101,7 @@ def build(today: dt.date, ingest_ok: bool | None, ingest_log: str) -> str:
     L = [f"# Pre-Trade Brief — {today:%A, %B %d, %Y}", ""]
     L.append(f"**{level}** — " + "; ".join(reasons))
     stale = " ⚠️ stale (today's ingest did not run)" if snap_date != today else ""
-    L.append(f"Data: snapshot **{snap_date}**{stale} · last ingest {li}")
+    L.append(f"Data: snapshot **{snap_date}**{stale} · last ingest {li} · universe {len(universe)} US stocks ≥ ${C.MIN_PRICE:.0f}")
     if ingest_ok is not None:
         L.append(f"Ingest this run: {'✅ ok' if ingest_ok else '❌ FAILED — see log at bottom'}")
     L.append("")
@@ -138,10 +138,10 @@ def build(today: dt.date, ingest_ok: bool | None, ingest_log: str) -> str:
              f"{int(flags.signal.sum()) if not flags.empty else 0} full call-setup signals · "
              f"{int((flags.leader_ctx & flags.leg_down).sum()) if not flags.empty else 0} leaders in a leg-down")
     L.append(_table(flags, ["ticker", "close", "tight_run", "rng_vs_atr", "nr", "inside", "doji",
-                            "leader_ctx", "leg_down", "signal"], limit=40))
+                            "leader_ctx", "leg_down", "signal"], limit=80))
     L.append("")
     L.append("## Call setups (leg-down exhaustion, screener universe)")
-    L.append(_table(hits, ["ticker", "close", "tight_run", "doji", "dfly", "inside", "entry", "stop"]))
+    L.append(_table(hits, ["ticker", "close", "tight_run", "doji", "dfly", "inside", "entry", "stop"], limit=60))
     L.append("")
     L.append("## Leader screens")
     L.append("**Leg Down**"); L.append(_table(leg, ["symbol", "status", "close", "dd_days",

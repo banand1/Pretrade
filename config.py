@@ -104,6 +104,12 @@ SCREENER_UNIVERSE = sorted(set(SCANNER_TICKERS) | set(WATCHLIST))
 # screens, scanner, watchlist setups). Cheaper names still ingest but never surface.
 MIN_PRICE = 15.0
 
+# Dynamic universe (universe.py, keyless NASDAQ screener feed). Everything that passes is
+# ingested daily and screened alongside the curated lists above.
+UNIVERSE_US_ONLY = True            # country == United States
+UNIVERSE_MIN_DOLLAR_VOL = 10e6     # last price x volume
+UNIVERSE_MIN_MARKET_CAP = 300e6
+
 def sector_of(symbol: str) -> str:
     return STOCK_SECTOR.get(symbol, "XLK")
 

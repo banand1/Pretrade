@@ -57,7 +57,8 @@ The dashboard also has a **Run ingest now** button, so you can refresh without t
 ## Customize
 
 Everything is in **config.py**: `WATCHLIST`, `PULLBACK_ETFS`, `SECTORS`, `MIN_PRICE` (screens ignore
-stocks closing below it), MA periods, the
+stocks closing below it), `UNIVERSE_MIN_DOLLAR_VOL` / `UNIVERSE_MIN_MARKET_CAP` / `UNIVERSE_US_ONLY`
+(the dynamic ~1,600-stock universe pulled from NASDAQ's keyless screener feed), MA periods, the
 flow thresholds (`VOL_OI_MIN`, `OI_DELTA_MIN`), `IV_RANK_HOT`, and the news `GEO_KEYWORDS`.
 FOMC dates live in `market_calendar.FOMC_DECISIONS` (2026 verified, 2027 tentative).
 
