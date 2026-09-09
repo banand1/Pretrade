@@ -87,11 +87,12 @@ def build(today: dt.date, ingest_ok: bool | None, ingest_log: str) -> str:
                           "WHEN '10-yr' THEN 3 ELSE 4 END", [use_date]).df()
         wl = con.execute("SELECT symbol, close, pct_1d, pct_5d, dist20_pct, dist50_pct, "
                          "pullback_flag, setup_score FROM snapshot WHERE snapshot_date=? "
-                         "AND symbol IN (SELECT UNNEST(?)) ORDER BY setup_score DESC, symbol",
-                         [use_date, list(C.WATCHLIST)]).df()
+                         "AND symbol IN (SELECT UNNEST(?)) AND close >= ? "
+                         "ORDER BY setup_score DESC, symbol",
+                         [use_date, list(C.WATCHLIST), C.MIN_PRICE]).df()
         universe = sorted(set(C.SCREENER_UNIVERSE))
         panel = cs.load_panel_from_con(con, universe)
-        hits = et.todays_hits(panel) if not panel.empty else pd.DataFrame()
+        hits = et.todays_hits(panel, cs.params()) if not panel.empty else pd.DataFrame()
         flags = cs.tight_flags(panel) if not panel.empty else pd.DataFrame()
         dq = data_quality(panel, snap_date)
     finally:
@@ -132,7 +133,7 @@ def build(today: dt.date, ingest_ok: bool | None, ingest_log: str) -> str:
                             for r in ydf.itertuples()))
     L.append("")
 
-    L.append("## Tight flags (last bar NR / inside / doji)")
+    L.append(f"## Tight flags (last bar NR / inside / doji · US stocks ≥ ${C.MIN_PRICE:.0f})")
     L.append(f"{len(flags)} symbols tight · "
              f"{int(flags.signal.sum()) if not flags.empty else 0} full call-setup signals · "
              f"{int((flags.leader_ctx & flags.leg_down).sum()) if not flags.empty else 0} leaders in a leg-down")

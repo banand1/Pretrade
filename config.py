@@ -100,6 +100,10 @@ STOCK_SECTOR = {
 # Combined universe the three leader screeners run over.
 SCREENER_UNIVERSE = sorted(set(SCANNER_TICKERS) | set(WATCHLIST))
 
+# Only US stocks closing at/above this price are screened (tight flags, call setups, leader
+# screens, scanner, watchlist setups). Cheaper names still ingest but never surface.
+MIN_PRICE = 15.0
+
 def sector_of(symbol: str) -> str:
     return STOCK_SECTOR.get(symbol, "XLK")
 

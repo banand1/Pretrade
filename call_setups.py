@@ -37,10 +37,17 @@ def load_panel_from_con(con, universe: list[str]) -> pd.DataFrame:
     return panel
 
 
-def tight_flags(panel: pd.DataFrame, p=et.P) -> pd.DataFrame:
+def params(**overrides) -> dict:
+    """exhaustion_trigger.P with the project price floor applied."""
+    p = dict(et.P); p["min_price"] = max(p["min_price"], getattr(C, "MIN_PRICE", 0.0))
+    p.update(overrides); return p
+
+
+def tight_flags(panel: pd.DataFrame, p=None) -> pd.DataFrame:
     """Every symbol whose last bar is tight (NR / inside / doji), with context.
     Wider net than todays_hits(): a tight day on a non-leader still gets listed;
     leader_ctx / leg_down say how close it is to a full call-setup signal."""
+    p = p or params()
     rows = []
     for tkr, g in panel.groupby("ticker"):
         g = g.set_index("date")[["open", "high", "low", "close", "volume"]].astype(float)
@@ -48,6 +55,8 @@ def tight_flags(panel: pd.DataFrame, p=et.P) -> pd.DataFrame:
             continue
         d = et.annotate(g, p)
         r = d.iloc[-1]
+        if r.close < p["min_price"]:
+            continue
         if r.tight_run >= 1:
             rng_atr = (r.high - r.low) / r.atr20 if r.atr20 else None
             rows.append(dict(ticker=tkr, close=round(r.close, 2), tight_run=int(r.tight_run),
@@ -89,7 +98,7 @@ def load_panel(tickers: tuple[str, ...]) -> pd.DataFrame:
 def render():
     st.subheader("Call Setups — leg-down exhaustion on leaders")
     with st.expander("Call Setups params", expanded=False):
-        p = dict(et.P)
+        p = params()
         p["nr_frac"] = st.slider("Tight day: range ≤ x·ATR20", 0.3, 0.9, p["nr_frac"], 0.05)
         p["min_tight_run"] = st.slider("Min consecutive tight days", 1, 4, p["min_tight_run"])
         p["down_days"] = st.slider("Red days in last 4", 2, 4, p["down_days"])

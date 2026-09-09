@@ -443,8 +443,11 @@ def build_universe(prices_map: dict[str, pd.DataFrame], sector_prices_map: dict[
                      for s, r in sector_ret20.items()}
 
     out = {}
+    min_price = getattr(C, "MIN_PRICE", 0.0)
     for sym, raw in prices_map.items():
         d = compute_indicators(raw)
+        if d is not None and len(d) and float(d["close"].iloc[-1]) < min_price:
+            continue                      # price floor: not screened at all
         sector = C.sector_of(sym)
         is_leader, diag = leader_gate(d, sector_ret63.get(sector), sector_ret126.get(sector))
         out[sym] = {"d": d, "leader": is_leader, "sector": sector,

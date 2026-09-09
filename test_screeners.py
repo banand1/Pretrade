@@ -308,3 +308,15 @@ def test_missing_data_handled_gracefully():
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def test_price_floor_drops_cheap_names_from_universe(monkeypatch):
+    """config.MIN_PRICE: a name closing below the floor is not screened at all,
+    regardless of its shape; one above it is."""
+    monkeypatch.setattr(S.C, "MIN_PRICE", 15.0, raising=False)
+    prices = {"CHEAP": flat_df(LEADER_UNIVERSE_LEN, price=10.0),
+              "OK": flat_df(LEADER_UNIVERSE_LEN, price=100.0)}
+    sectors = {"XLK": flat_df(LEADER_UNIVERSE_LEN)}
+    universe = S.build_universe(prices, sectors, spy_df=flat_df(LEADER_UNIVERSE_LEN))
+    assert "CHEAP" not in universe
+    assert "OK" in universe

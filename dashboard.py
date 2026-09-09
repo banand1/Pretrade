@@ -291,8 +291,8 @@ def panel_watchlist(con, today, ev):
                s.pullback_flag, s.setup_score, iv.atm_iv, e.next_earnings
         FROM snapshot s LEFT JOIN iv_atm iv ON iv.symbol=s.symbol AND iv.date=s.snapshot_date
         LEFT JOIN earnings e ON e.symbol=s.symbol
-        WHERE s.snapshot_date=? AND s.kind='watch'
-        ORDER BY s.setup_score DESC, s.off_high20_pct ASC""", [today])
+        WHERE s.snapshot_date=? AND s.kind='watch' AND s.close >= ?
+        ORDER BY s.setup_score DESC, s.off_high20_pct ASC""", [today, C.MIN_PRICE])
     if df.empty: st.caption("— no data —"); return
     from ingest import iv_rank, realized_vol
     # IV rank
@@ -401,7 +401,7 @@ def panel_scanner(con, today):
     rows = []
     for sym, g in df.groupby("symbol"):
         g = g.sort_values("date").tail(63)  # 3 months
-        if len(g) < 2: continue
+        if len(g) < 2 or g["close"].iloc[-1] < C.MIN_PRICE: continue
         g = g.copy()
         g["range"] = (g["high"] - g["low"]).round(2)
         g["%chg"] = (g["close"].pct_change() * 100).round(2)
